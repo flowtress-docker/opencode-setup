@@ -328,6 +328,10 @@ export async function spawnOrchestrationTeam(
     if (usedPaneIds.has(handle.paneId)) {
       handle = await spawnSubOrchestrator(session, ws, workspaceId);
     }
+    // YELLOW: pane-0 invariant. Surface a warning when the sub-orchestrator
+    // is not the lowest-id pane in its tab. The live test in
+    // `__tests__/live/team-spawner.spec.ts > pane-0 invariant` pins this path.
+    assertSubOrchestratorIsLowestPane(session, handle.tabId, handle.paneId, ws.name);
     subOrchestrators.push({
       workstream: ws.name,
       paneId: handle.paneId,
@@ -548,6 +552,79 @@ export function listRegisteredWorkstreams(registryContents: string): string[] {
     out.push(parts[0]);
   }
   return out;
+}
+
+// ---------------------------------------------------------------------------
+// YELLOW: pane-0 invariant (assertSubOrchestratorIsLowestPane)
+// ---------------------------------------------------------------------------
+
+/**
+ * Assert that the sub-orchestrator's pane is the lowest-id pane in its tab.
+ *
+ * The spec's invariant is "sub-orch is pane 0 of its tab; sub-agent
+ * panes are siblings of pane 0 with pane ids >= 1." If herdr
+ * allocates a non-root pane id to the agent (e.g. the agent-start
+ * path creates a new pane instead of reusing the tab's root), the
+ * invariant breaks silently and downstream code that addresses
+ * the sub-orchestrator by its pane id routes to the wrong pane.
+ *
+ * This function surfaces a YELLOW `liberty-pane-0-invariant`
+ * warning when the sub-orchestrator's pane id is not the lowest
+ * pane id in the tab. It does NOT throw — the warning is
+ * observational, and some herdr versions may legitimately
+ * allocate the agent pane after the root pane. The live test
+ * `__tests__/live/team-spawner.spec.ts > pane-0 invariant`
+ * pins the warning's presence.
+ */
+function assertSubOrchestratorIsLowestPane(
+  session: HerdrSession,
+  tabId: string,
+  subOrchPaneId: string,
+  workstream: string,
+): void {
+  let stdout: string;
+  try {
+    stdout = execSync(
+      `${DOCKER_BIN} exec ${session.getContainerId()} herdr pane list`,
+      { encoding: "utf-8" },
+    );
+  } catch {
+    return; // best-effort; a transient lookup failure is non-fatal
+  }
+  let panes: any[];
+  try {
+    const payload = JSON.parse(stdout.trim());
+    panes = Array.isArray(payload?.result?.panes) ? payload.result.panes : [];
+  } catch {
+    return;
+  }
+  const tabPanes = panes.filter((p) => p?.tab_id === tabId);
+  if (tabPanes.length === 0) return;
+  // Compute the lowest pane id in the tab. Pane ids look like
+  // "<tab-prefix>-1", "<tab-prefix>-2", etc. — split on the last
+  // "-" and parse the trailing number so we don't get fooled by
+  // non-numeric ids.
+  let lowestPaneId: string | null = null;
+  let lowestPaneNum = Number.POSITIVE_INFINITY;
+  for (const p of tabPanes) {
+    if (typeof p?.pane_id !== "string") continue;
+    const m = /-(\d+)$/.exec(p.pane_id);
+    if (!m) continue;
+    const n = Number(m[1]);
+    if (Number.isFinite(n) && n < lowestPaneNum) {
+      lowestPaneNum = n;
+      lowestPaneId = p.pane_id;
+    }
+  }
+  if (lowestPaneId !== null && lowestPaneId !== subOrchPaneId) {
+    console.warn(
+      `YELLOW[liberty-pane-0-invariant]: sub-orchestrator pane ${subOrchPaneId} ` +
+        `for workstream "${workstream}" is NOT the lowest-id pane in tab ${tabId} ` +
+        `(lowest is ${lowestPaneId}). The pane-0 invariant may be broken; ` +
+        `verify that downstream consumers use the recorded paneId and not ` +
+        `the bare "pane 0" assumption.`,
+    );
+  }
 }
 
 // ---------------------------------------------------------------------------

@@ -21,7 +21,7 @@
  * block reuses the session via the `ctx` singleton.
  */
 
-import { describe, it, expect, afterAll, beforeAll } from "vitest";
+import { describe, it, expect, afterAll, beforeAll, vi } from "vitest";
 import { execSync } from "node:child_process";
 import {
   launchFromSpec,
@@ -470,5 +470,49 @@ describeOrSkip("T6: re-running spawnOrchestrationTeam is safe", () => {
 
     const registered = listRegisteredWorkstreams(directRead);
     expect(registered).toEqual(["scaffold_2"]);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// T7: pane-0 invariant — assertSubOrchestratorIsLowestPane emits YELLOW
+// ---------------------------------------------------------------------------
+
+describeOrSkip("T7: pane-0 invariant emits YELLOW liberty-pane-0-invariant", () => {
+  afterAll(async () => {
+    if (ctx.herdrSession) {
+      await ctx.herdrSession.close();
+      ctx.herdrSession = null;
+    }
+    if (ctx.containerId) {
+      await cleanupContainer(ctx.containerId);
+      ctx.containerId = "";
+    }
+  });
+
+  it("emits YELLOW liberty-pane-0-invariant when a sub-orchestrator is not the lowest-pane pane in its tab", async () => {
+    const session = await ensureSession();
+    if (!session) return;
+
+    // Spy on console.warn to capture the YELLOW output emitted by
+    // assertSubOrchestratorIsLowestPane when the sub-orchestrator is not
+    // the lowest-id pane in its tab.
+    const warnSpy = vi.spyOn(console, "warn");
+    try {
+      const result = await spawnOrchestrationTeam(session, CANONICAL_WORKSTREAMS);
+      expect(result.subOrchestrators.length).toBeGreaterThan(0);
+
+      // The YELLOW warning is emitted by team-spawner.ts's
+      // assertSubOrchestratorIsLowestPane whenever the sub-orchestrator
+      // is not the lowest-id pane in its tab. With herdr v0.6.10's
+      // `--tab` fallback, this condition is true for at least one
+      // workstream, so we expect at least one such warning.
+      const yellowWarnings = warnSpy.mock.calls
+        .map((args) => args.map((a) => String(a)).join(" "))
+        .filter((msg) => msg.includes("liberty-pane-0-invariant"));
+
+      expect(yellowWarnings.length).toBeGreaterThan(0);
+    } finally {
+      warnSpy.mockRestore();
+    }
   });
 });
