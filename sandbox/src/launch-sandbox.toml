@@ -16,65 +16,47 @@
 # (user workspace) for the canonical definitions. ADR 0001 pins the
 # one-orchestrator-per-workspace invariant; ADR 0002 pins the
 # runtime-only enforcement of the user-workspace reservation.
+#
+# ADR 0010: Docker containers replaced by macOS Seatbelt (sandbox-exec).
+# The [sandbox] block defines the SBPL profile contract. Spec-3 adds
+# per-tier profiles without changing this block's shape.
 
 [meta]
 name = "launch-sandbox"
-version = "0.3.0"
-description = "Spec-2 contract: orchestrator + user workspace pair, validator-enforced."
+version = "0.4.0"
+description = "Spec-2 contract: macOS Seatbelt sandbox + orchestrator/user workspace pair."
 
 # F2: herdr auto-allocates exactly one pane at startup (pane 0). Sub-agent
 # panes are on demand and do not count toward this count.
 [pane_config]
 pane_startup_count = 1
 
-[image]
-base = "node:22-bookworm"
-agent_uid = 1000
-agent_gid = 1000
-agent_user = "agent"
-# node:22-bookworm already has a 'node' user at uid 1000. The launcher
-# must detect this collision and either pick the first free uid
-# (1001) or override via the chosen strategy.
-uid_collision_strategy = "shift_to_first_free"
+[sandbox]
+type = "darwin_seatbelt"
+profile_dir = "${TMPDIR}/sandbox-profiles"
 
-[build]
-# stdin heredoc hung under Colima; tempfile is mandatory.
-context_strategy = "tempfile"
-build_timeout_sec = 180
-registry_fallbacks = ["docker.io", "ghcr.io"]
-pull_timeout_sec = 60
-registry_fallbacks_required = true
+[sandbox.read_roots]
+paths = ["/usr", "/System/Library/Frameworks", "/bin", "/sbin",
+         "/private/etc", "/private/var/db/dyld", "/dev"]
 
-[install]
-[[install.steps]]
-name = "apt-base"
-cmd = "apt-get update && apt-get install -y git curl jq && rm -rf /var/lib/apt/lists/*"
+[sandbox.write_roots]
+paths = ["${WORKSPACE}", "${TMPDIR}"]
 
-[[install.steps]]
-name = "herdr"
-cmd = "curl -fsSL https://herdr.dev/install.sh | sh"
-fallback_cmd = "curl -fsSL https://github.com/ogulcancelik/herdr/releases/latest/download/herdr-linux-aarch64 -o /usr/local/bin/herdr && chmod +x /usr/local/bin/herdr"
-fallback_cmd_required = true
-bin_name = "herdr"
-must_succeed = true
+[sandbox.cwd_allow_hidden]
+basenames = [".venv", ".git", ".node_modules"]
 
-[[install.steps]]
-name = "picode"
-npm = "@earendil-works/pi-coding-agent"
-cmd = "npm install -g @earendil-works/pi-coding-agent"
-bin_name = "pi"
-must_succeed = true
+[sandbox.network]
+allow = false
 
-[entrypoint]
-form = "cmd"
-cmd = ["/bin/bash"]
-supports_sleep_infinity = true
+[sandbox.env]
+passthrough = ["PATH", "HOME", "TMPDIR", "LANG",
+               "DEEPSEEK_API_KEY", "AGENT_CAPABILITY"]
 
-# Container's main user. Distinct from the per-workspace `[[workspace]]`
-# blocks below, which describe herdr-level layout inside that user.
+# Workspace path on host. Distinct from the per-workspace `[[workspace]]`
+# blocks below, which describe herdr-level layout inside the sandbox.
 [user]
 name = "user"
-workdir = "/home/agent/user-workspace"
+workdir = "${WORKSPACE}"
 
 # Workspace roles. The user workspace is the only one with role="user";
 # the orchestrator workspace (default) lives in the first [[workspace]] block.
@@ -83,21 +65,12 @@ label = "user"
 role = "user"
 tab = [{ label = "user", cmd = ["bash"] }]
 
-[health]
-post_build_checks = [
-  "docker image inspect ${IMAGE_NAME}",
-  "docker run --rm ${IMAGE_NAME} herdr --version",
-  "docker run --rm ${IMAGE_NAME} pi --version"
-]
-post_build_checks_required = true
-post_start_timeout_sec = 30
-
 # Orchestration (F1-F6) — kept minimal in spec-2 because the runtime
 # derives everything from the `[[workspace]]` blocks above. See
 # fixtures/sandbox-spec/src/{governance,multiplexing,orchestration}.ts
 # for the spec-level orchestration types and helpers.
 [launch]
-mode = "single-container"
+mode = "single-sandbox"
 
 [pane_delegation]
 mode = "spawn_new_tab"

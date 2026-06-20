@@ -17,6 +17,10 @@
  * any `targetTabId` whose tab label starts with `user-`; this
  * validator is the spec-side half of that reservation. See ADR 0002
  * and sandbox/CONTEXT.md §1.4 / §1.5 / §2.5.
+ *
+ * ADR 0010: Docker containers replaced by macOS Seatbelt. The
+ * [sandbox] block is the new isolation contract. Spec-3 adds
+ * per-tier profiles without changing this block's shape.
  */
 
 import { readFileSync } from "node:fs";
@@ -26,7 +30,6 @@ import { parse as parseToml } from "smol-toml";
 import { reserveUserWorkspace, type UserWorkspaceHandle, type LaunchSpec } from "../fixtures/sandbox-spec/src/orchestration.js";
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
-// launch-sandbox.ts lives next to launch-sandbox.toml in the spec-2 src tree.
 const SPEC_PATH = resolve(__dirname, "./launch-sandbox.toml");
 
 /** Valid roles for a `[[workspace]]` block. */
@@ -39,32 +42,24 @@ export interface LaunchSandboxWorkspace {
   tab: Array<{ label: string; cmd: string[] }>;
 }
 
+/** Seatbelt sandbox profile contract. */
+export interface SeatbeltSpec {
+  type: "darwin_seatbelt";
+  profile_dir: string;
+  read_roots: { paths: string[] };
+  write_roots: { paths: string[] };
+  cwd_allow_hidden: { basenames: string[] };
+  network: { allow: boolean };
+  env: { passthrough: string[] };
+}
+
 /** The full validated spec-2 launch-sandbox contract. */
 export interface LaunchSandboxSpec {
   meta: { name: string; version: string; description: string };
-  image: {
-    base: string;
-    agent_uid: number;
-    agent_gid: number;
-    agent_user: string;
-    uid_collision_strategy: string;
-  };
-  build: {
-    context_strategy: string;
-    build_timeout_sec: number;
-    registry_fallbacks: string[];
-    pull_timeout_sec: number;
-    registry_fallbacks_required: boolean;
-  };
-  install: { steps: Array<Record<string, unknown>> };
-  entrypoint: { form: string; cmd: string[]; supports_sleep_infinity: boolean };
+  sandbox: SeatbeltSpec;
+  pane_config: { pane_startup_count: number };
   user: { name: string; workdir: string };
-  health: {
-    post_build_checks: string[];
-    post_build_checks_required: boolean;
-    post_start_timeout_sec: number;
-  };
-  launch: { mode: "single-container" };
+  launch: { mode: "single-sandbox" };
   pane_delegation: {
     mode: "spawn_new_tab";
     one_pane_per_agent: boolean;
@@ -100,14 +95,15 @@ export class LaunchSandboxSpecError extends Error {
  *
  * Validation order:
  *   1. Required top-level fields exist and have the right type.
- *   2. Required enums and value constraints (base image, build strategy,
- *      etc.) match the spec-2 contract.
+ *   2. Sandbox profile constraints (type, network policy).
  *   3. `[[workspace]]` blocks: valid role, exactly one user block, every
  *      user block's first tab has `label = "user"`.
+ *   4. Orchestration table field constraints.
  */
 export function parseLaunchSandboxSpec(raw: unknown): LaunchSandboxSpec {
   const obj = raw as Record<string, any> | null | undefined;
-  for (const k of ["meta", "image", "build", "install", "entrypoint", "user", "health"]) {
+
+  for (const k of ["meta", "sandbox", "user"]) {
     if (typeof obj?.[k] !== "object" || obj[k] === null) {
       throw new LaunchSandboxSpecError(k, "missing or not an object");
     }
@@ -118,43 +114,27 @@ export function parseLaunchSandboxSpec(raw: unknown): LaunchSandboxSpec {
       `expected "launch-sandbox", got ${JSON.stringify(obj!.meta.name)}`,
     );
   }
-  if (obj!.image.base !== "node:22-bookworm") {
+
+  // --- Sandbox profile validation (ADR 0010) --------------------------------
+  if (obj!.sandbox.type !== "darwin_seatbelt") {
     throw new LaunchSandboxSpecError(
-      "image.base",
-      `expected "node:22-bookworm", got ${JSON.stringify(obj!.image.base)}`,
+      "sandbox.type",
+      `expected "darwin_seatbelt", got ${JSON.stringify(obj!.sandbox.type)}`,
     );
   }
-  if (obj!.image.uid_collision_strategy !== "shift_to_first_free") {
+  if (
+    typeof obj!.sandbox.network !== "object" ||
+    obj!.sandbox.network === null
+  ) {
     throw new LaunchSandboxSpecError(
-      "image.uid_collision_strategy",
-      `expected "shift_to_first_free", got ${JSON.stringify(obj!.image.uid_collision_strategy)}`,
+      "sandbox.network",
+      "missing or not an object",
     );
   }
-  if (obj!.build.context_strategy !== "tempfile") {
+  if (obj!.sandbox.network.allow !== false) {
     throw new LaunchSandboxSpecError(
-      "build.context_strategy",
-      `expected "tempfile", got ${JSON.stringify(obj!.build.context_strategy)}`,
-    );
-  }
-  if (obj!.build.registry_fallbacks_required !== true) {
-    throw new LaunchSandboxSpecError(
-      "build.registry_fallbacks_required",
-      "must be true",
-    );
-  }
-  if (!Array.isArray(obj!.install.steps)) {
-    throw new LaunchSandboxSpecError("install.steps", "must be an array");
-  }
-  if (obj!.entrypoint.form !== "cmd") {
-    throw new LaunchSandboxSpecError(
-      "entrypoint.form",
-      `expected "cmd", got ${JSON.stringify(obj!.entrypoint.form)}`,
-    );
-  }
-  if (obj!.health.post_build_checks_required !== true) {
-    throw new LaunchSandboxSpecError(
-      "health.post_build_checks_required",
-      "must be true",
+      "sandbox.network.allow",
+      "must be false (egress proxy deferred to spec-3)",
     );
   }
 
@@ -166,7 +146,7 @@ export function parseLaunchSandboxSpec(raw: unknown): LaunchSandboxSpec {
     throw new LaunchSandboxSpecError("workspace", "must declare at least one [[workspace]] block");
   }
 
-  const validRoles: ReadonlySet<WorkspaceRole> = new Set(["orchestrator", "user"]);
+  const validRoles: ReadonlySet<string> = new Set(["orchestrator", "user"]);
   let userCount = 0;
   const normalizedWorkspaces: LaunchSandboxWorkspace[] = [];
 
@@ -178,7 +158,6 @@ export function parseLaunchSandboxSpec(raw: unknown): LaunchSandboxSpec {
       );
     }
 
-    // Role is optional; default is "orchestrator".
     const rawRole = block.role;
     let role: WorkspaceRole;
     if (rawRole === undefined || rawRole === null) {
@@ -201,7 +180,6 @@ export function parseLaunchSandboxSpec(raw: unknown): LaunchSandboxSpec {
       userCount += 1;
     }
 
-    // Tab list shape.
     if (!Array.isArray(block.tab) || block.tab.length === 0) {
       throw new LaunchSandboxSpecError(
         `workspace[${index}].tab`,
@@ -258,10 +236,10 @@ export function parseLaunchSandboxSpec(raw: unknown): LaunchSandboxSpec {
   }
 
   // --- Orchestration tables ------------------------------------------------
-  if (obj!.launch?.mode !== "single-container") {
+  if (obj!.launch?.mode !== "single-sandbox") {
     throw new LaunchSandboxSpecError(
       "launch.mode",
-      `expected "single-container", got ${JSON.stringify(obj!.launch?.mode)}`,
+      `expected "single-sandbox", got ${JSON.stringify(obj!.launch?.mode)}`,
     );
   }
   if (obj!.pane_delegation?.mode !== "spawn_new_tab") {
@@ -279,12 +257,9 @@ export function parseLaunchSandboxSpec(raw: unknown): LaunchSandboxSpec {
 
   return {
     meta: obj!.meta,
-    image: obj!.image,
-    build: obj!.build,
-    install: obj!.install,
-    entrypoint: obj!.entrypoint,
+    sandbox: obj!.sandbox,
+    pane_config: obj!.pane_config,
     user: obj!.user,
-    health: obj!.health,
     launch: obj!.launch,
     pane_delegation: obj!.pane_delegation,
     limits: obj!.limits,
@@ -297,23 +272,11 @@ export function parseLaunchSandboxSpec(raw: unknown): LaunchSandboxSpec {
 const RAW = parseToml(readFileSync(SPEC_PATH, "utf8"));
 export const LAUNCH_SANDBOX_SPEC: LaunchSandboxSpec = parseLaunchSandboxSpec(RAW);
 
-/**
- * Run the user-workspace reservation on the validated spec. Throws
- * if no user block is present (the validator already guarantees
- * exactly one is, so this should not throw in practice — it is here
- * to surface a `UserWorkspaceHandle` to the runtime).
- */
 export function reserveUserWorkspaceFromSpec(): UserWorkspaceHandle {
-  // Cast: LaunchSandboxSpec is a strict superset of LaunchSpec, so the
-  // reservation helper accepts it.
   return reserveUserWorkspace(LAUNCH_SANDBOX_SPEC as unknown as LaunchSpec);
 }
 
 export const LAUNCH_SANDBOX_META = LAUNCH_SANDBOX_SPEC.meta;
-export const LAUNCH_SANDBOX_IMAGE = LAUNCH_SANDBOX_SPEC.image;
-export const LAUNCH_SANDBOX_BUILD = LAUNCH_SANDBOX_SPEC.build;
-export const LAUNCH_SANDBOX_INSTALL_STEPS = LAUNCH_SANDBOX_SPEC.install.steps;
-export const LAUNCH_SANDBOX_ENTRYPOINT = LAUNCH_SANDBOX_SPEC.entrypoint;
 export const LAUNCH_SANDBOX_USER = LAUNCH_SANDBOX_SPEC.user;
-export const LAUNCH_SANDBOX_HEALTH = LAUNCH_SANDBOX_SPEC.health;
+export const LAUNCH_SANDBOX_SANDBOX = LAUNCH_SANDBOX_SPEC.sandbox;
 export const LAUNCH_SANDBOX_WORKSPACES = LAUNCH_SANDBOX_SPEC.workspace;

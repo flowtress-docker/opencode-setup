@@ -18,7 +18,7 @@ const PROJECT_ROOT = path.resolve(import.meta.dirname, "..");
 const FIXTURE_SOURCES = [
   "fixtures/sandbox-spec/src/herdr.ts",
   "fixtures/sandbox-spec/src/picode.ts",
-  "fixtures/sandbox-spec/src/docker.ts",
+  "fixtures/sandbox-spec/src/seatbelt.ts",
   "fixtures/sandbox-spec/src/system.ts",
   "fixtures/sandbox-spec/src/limits.ts",
 ] as const;
@@ -26,7 +26,7 @@ const FIXTURE_SOURCES = [
 const FIXTURE_SPECS = [
   "fixtures/sandbox-spec/tests/herdr.spec.ts",
   "fixtures/sandbox-spec/tests/picode.spec.ts",
-  "fixtures/sandbox-spec/tests/docker.spec.ts",
+  "fixtures/sandbox-spec/tests/seatbelt.spec.ts",
   "fixtures/sandbox-spec/tests/system.spec.ts",
   "fixtures/sandbox-spec/tests/limits.spec.ts",
 ] as const;
