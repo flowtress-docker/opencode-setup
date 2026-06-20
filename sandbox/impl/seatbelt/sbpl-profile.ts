@@ -16,12 +16,13 @@
  *   - `(allow process-fork)` — required for spawning subprocesses
  *   - `(allow process-exec)` — required for herdr agent start (exec)
  *   - `(allow sysctl-read)` — required by Node.js runtime
- *   - Network: `(deny network*)` for loopback-only; no network allow rules
+ *   - Network: `(allow network-outbound)` for spec-2; spec-3 → egress proxy
  */
 
 import { execSync } from "node:child_process";
-import { writeFileSync, mkdirSync, chmodSync } from "node:fs";
+import { writeFileSync, mkdirSync, unlinkSync } from "node:fs";
 import { tmpdir } from "node:os";
+import { randomUUID } from "node:crypto";
 import { join } from "node:path";
 import type { SeatbeltSpec } from "../../src/launch-sandbox.js";
 
@@ -136,12 +137,14 @@ export function generateSeatbeltProfile(
     lines.push(``);
   }
 
-  // Network — deny all by default (loopback-only).
-  // herdr uses Unix sockets for IPC, so no network allow rules needed.
-  // If herdr ever switches to TCP loopback, uncomment:
-  //   (allow network* (local ip "127.0.0.1:*"))
-  if (!spec.network?.allow) {
-    lines.push(`;; ── network: deny (loopback-only, herdr uses Unix sockets) ──`);
+  // Network — spec-2 allows outbound for pi → DeepSeek API.
+  // spec-3 replaces this with egress proxy per ADR 0008.
+  if (spec.network?.allow) {
+    lines.push(`;; ── network: outbound allowed (spec-2), spec-3 → egress proxy ──`);
+    lines.push(`(allow network-outbound)`);
+    lines.push(``);
+  } else {
+    lines.push(`;; ── network: deny (loopback-only) ──`);
     lines.push(`(deny network*)`);
     lines.push(``);
   }
@@ -181,14 +184,21 @@ export function writeSeatbeltProfile(
   } catch {
     // best-effort — mkdir may fail inside an existing sandbox profile test;
     // fall back to os.tmpdir()
-    const fallback = join(tmpdir(), "sandbox-profiles");
-    mkdirSync(fallback, { recursive: true, mode: 0o700 });
-    const profilePath = join(fallback, `sbpl-${Date.now()}.sbpl`);
-    writeFileSync(profilePath, profile, { mode: 0o600, encoding: "utf-8" });
-    return { profilePath, profile };
+    try {
+      const fallback = join(tmpdir(), "sandbox-profiles");
+      mkdirSync(fallback, { recursive: true, mode: 0o700 });
+      const profilePath = join(fallback, `sbpl-${Date.now()}-${randomUUID().slice(0, 4)}.sbpl`);
+      writeFileSync(profilePath, profile, { mode: 0o600, encoding: "utf-8" });
+      return { profilePath, profile };
+    } catch (fallbackErr: any) {
+      throw new Error(
+        `writeSeatbeltProfile: failed to create profile directory in both "${profileDir}" ` +
+        `and fallback tmpdir: ${fallbackErr?.message ?? fallbackErr}`,
+      );
+    }
   }
 
-  const profilePath = join(profileDir, `sbpl-${Date.now()}.sbpl`);
+  const profilePath = join(profileDir, `sbpl-${Date.now()}-${randomUUID().slice(0, 4)}.sbpl`);
   writeFileSync(profilePath, profile, { mode: 0o600, encoding: "utf-8" });
   return { profilePath, profile };
 }
@@ -198,7 +208,6 @@ export function writeSeatbeltProfile(
  */
 export function removeSeatbeltProfile(profilePath: string): void {
   try {
-    const { unlinkSync } = require("node:fs");
     unlinkSync(profilePath);
   } catch {
     // best-effort

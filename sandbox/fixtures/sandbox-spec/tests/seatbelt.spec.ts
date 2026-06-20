@@ -4,8 +4,7 @@ import {
   READ_ROOTS,
   WRITE_ROOTS,
   CWD_ALLOW_HIDDEN,
-  ALLOW_NETWORK,
-  NETWORK_LOOPBACK_ONLY,
+  ALLOW_OUTBOUND,
   ENV_PASSTHROUGH,
 } from "../src/seatbelt.js";
 
@@ -49,12 +48,8 @@ describe("seatbelt spec", () => {
     expect(CWD_ALLOW_HIDDEN).toHaveLength(3);
   });
 
-  it("ALLOW_NETWORK is false (loopback-only)", () => {
-    expect(ALLOW_NETWORK).toBe(false);
-  });
-
-  it("NETWORK_LOOPBACK_ONLY is true (consistent with ALLOW_NETWORK)", () => {
-    expect(NETWORK_LOOPBACK_ONLY).toBe(true);
+  it("ALLOW_OUTBOUND is true (spec-2 allows outbound for agent API)", () => {
+    expect(ALLOW_OUTBOUND).toBe(true);
   });
 
   it("ENV_PASSTHROUGH includes agent capability and DeepSeek key", () => {

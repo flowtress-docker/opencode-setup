@@ -141,6 +141,11 @@ export function seatbeltLaunch(
     stderr += chunk.toString();
   });
 
+  // Capture spawn errors — ENOENT (sandbox-exec not found) or EACCES (F7)
+  proc.on("error", (err: Error) => {
+    stderr += `\n[spawn error: ${err.message}]`;
+  });
+
   // Attach exit handler for crash detection (F6)
   proc.on("exit", (code, signal) => {
     if (code !== 0 && code !== null) {

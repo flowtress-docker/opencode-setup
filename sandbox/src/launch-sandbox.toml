@@ -37,7 +37,9 @@ profile_dir = "${TMPDIR}/sandbox-profiles"
 
 [sandbox.read_roots]
 paths = ["/usr", "/System/Library/Frameworks", "/bin", "/sbin",
-         "/private/etc", "/private/var/db/dyld", "/dev"]
+         "/private/etc", "/private/var/db/dyld", "/dev",
+         "${HOME}/.local/bin", "${HOME}/.nvm/versions/node",
+         "/opt/homebrew", "/opt/homebrew/bin"]
 
 [sandbox.write_roots]
 paths = ["${WORKSPACE}", "${TMPDIR}"]
@@ -46,7 +48,7 @@ paths = ["${WORKSPACE}", "${TMPDIR}"]
 basenames = [".venv", ".git", ".node_modules"]
 
 [sandbox.network]
-allow = false
+allow = true
 
 [sandbox.env]
 passthrough = ["PATH", "HOME", "TMPDIR", "LANG",

@@ -21,8 +21,7 @@ export const CWD_ALLOW_HIDDEN = [
   ".node_modules",
 ] as const;
 
-export const ALLOW_NETWORK = false;
-export const NETWORK_LOOPBACK_ONLY = true;
+export const ALLOW_OUTBOUND = true;
 
 export const ENV_PASSTHROUGH = [
   "PATH",
