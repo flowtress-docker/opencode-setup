@@ -16,7 +16,7 @@
  */
 
 import { resolve, dirname } from "node:path";
-import { readFileSync } from "node:fs";
+import { readFileSync, mkdirSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 import { tmpdir } from "node:os";
 import { parse as parseToml } from "smol-toml";
@@ -26,6 +26,7 @@ import {
   piAvailable,
   seatbeltLaunch,
   seatbeltStop,
+  generateSocketPath,
   type SeatbeltLaunchResult,
 } from "./adapter.js";
 import {
@@ -48,6 +49,8 @@ export interface SeatbeltRunResult {
   procHandle: SeatbeltLaunchResult;
   /** The launch plan (sandboxes=1, mode, workspaceDir). */
   plan: SeatbeltLaunchPlan;
+  /** HERDR_SOCKET_PATH for this session (F9, F5). */
+  socketPath: string;
 }
 
 /**
@@ -120,11 +123,21 @@ export async function seatbeltLaunchFromSpec(): Promise<SeatbeltRunResult> {
 
   const { spec, workspaceDir } = readSeatbeltSpec();
 
+  // Ensure the workspace directory exists (F4 fix)
+  try {
+    mkdirSync(workspaceDir, { recursive: true });
+  } catch {
+    // best-effort — directory may already exist or be unwritable
+  }
+
+  // Generate a unique socket path for this session (F9)
+  const socketPath = generateSocketPath();
+
   // Generate and write the SBPL profile.
   const { profilePath } = writeSeatbeltProfile(spec, workspaceDir);
 
-  // Spawn herdr under sandbox-exec.
-  const procHandle = seatbeltLaunch(profilePath, workspaceDir);
+  // Spawn herdr under sandbox-exec with the unique socket path.
+  const procHandle = seatbeltLaunch(profilePath, workspaceDir, socketPath);
 
   const plan: SeatbeltLaunchPlan = {
     sandboxes: 1,
@@ -135,6 +148,7 @@ export async function seatbeltLaunchFromSpec(): Promise<SeatbeltRunResult> {
   return {
     procHandle,
     plan,
+    socketPath,
   };
 }
 
@@ -145,7 +159,7 @@ export async function seatbeltLaunchFromSpec(): Promise<SeatbeltRunResult> {
 export async function cleanupSeatbelt(
   result: SeatbeltRunResult,
 ): Promise<void> {
-  seatbeltStop(result.procHandle.proc);
+  seatbeltStop(result.procHandle.proc, result.socketPath);
   removeSeatbeltProfile(result.procHandle.profilePath);
 }
 

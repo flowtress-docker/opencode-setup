@@ -2,18 +2,20 @@
  * SeatbeltHerdrSession — herdr session running under macOS Seatbelt.
  *
  * ADR 0010: Mirrors `HerdrSession` API but executes herdr commands
- * directly on the host (no docker exec wrapper).
+ * directly on the host (no docker exec wrapper). Uses HERDR_SOCKET_PATH
+ * env var (herdr v0.7.0+) for per-session socket isolation.
  *
  * Key differences from Docker HerdrSession:
- *   - herdr daemon is spawned by `sandbox-exec -f profile.sbpl herdr server start`
- *   - All herdr CLI calls are direct (no `docker exec <containerId>`)
+ *   - herdr server spawned by `sandbox-exec -f profile.sbpl env HERDR_SOCKET_PATH=... herdr server`
+ *   - herdr server stays foreground (no daemonization /src/server/headless.rs)
+ *   - All CLI calls use HERDR_SOCKET_PATH to reach the correct daemon
  *   - No node-pty — detached daemon + CLI commands only
  *   - Audit log writes to a per-session directory, not /tmp/
- *   - Per-session socket path to avoid concurrent collisions (F9)
+ *   - Per-session socket path via `generateSocketPath()` (F9, F5)
  *   - Retry policy classifies ECONNREFUSED as transient (F11)
  */
 
-import { execSync, spawn, type ExecSyncOptions } from "node:child_process";
+import { execSync, type ExecSyncOptions } from "node:child_process";
 import { mkdirSync, appendFileSync } from "node:fs";
 import { join } from "node:path";
 import type {
@@ -37,7 +39,6 @@ const DEFAULT_RETRY_DELAY_MS = 250;
 function isTransientSeatbeltFailure(stderr: string, exitCode: number): boolean {
   if (exitCode === 0) return false;
   const lower = stderr.toLowerCase();
-  // Seatbelt/daemon-level transient errors — daemon may still be booting
   if (
     lower.includes("connection refused") ||
     lower.includes("econnrefused") ||
@@ -46,7 +47,6 @@ function isTransientSeatbeltFailure(stderr: string, exitCode: number): boolean {
   ) {
     return true;
   }
-  // Permanent errors
   if (
     lower.includes("denied") ||
     lower.includes("permission") ||
@@ -55,7 +55,6 @@ function isTransientSeatbeltFailure(stderr: string, exitCode: number): boolean {
   ) {
     return false;
   }
-  // Default: treat unknown errors as transient (daemon may not be ready)
   return true;
 }
 
@@ -90,12 +89,19 @@ function sleep(ms: number): Promise<void> {
 }
 
 // ---------------------------------------------------------------------------
-// CLI helpers
+// CLI helpers (socket-path-aware)
 // ---------------------------------------------------------------------------
 
-function herdrExec(args: string[]): { exitCode: number; stdout: string; stderr: string } {
+function herdrExec(
+  args: string[],
+  socketPath: string,
+): { exitCode: number; stdout: string; stderr: string } {
   const cmd = ["herdr", ...args];
-  const opts: ExecSyncOptions = { encoding: "utf-8", stdio: ["pipe", "pipe", "pipe"] };
+  const opts: ExecSyncOptions = {
+    encoding: "utf-8",
+    stdio: ["pipe", "pipe", "pipe"],
+    env: { ...process.env, HERDR_SOCKET_PATH: socketPath },
+  };
   try {
     const stdout = execSync(cmd.join(" "), opts) as string;
     return { exitCode: 0, stdout: stdout ?? "", stderr: "" };
@@ -111,6 +117,7 @@ function herdrExec(args: string[]): { exitCode: number; stdout: string; stderr: 
 function herdrExecWithInput(
   args: string[],
   input: string,
+  socketPath: string,
 ): { exitCode: number; stdout: string; stderr: string } {
   try {
     const { spawnSync } = require("node:child_process");
@@ -118,6 +125,7 @@ function herdrExecWithInput(
       input,
       encoding: "utf-8",
       stdio: ["pipe", "pipe", "pipe"],
+      env: { ...process.env, HERDR_SOCKET_PATH: socketPath },
     });
     return {
       exitCode: result.status ?? 0,
@@ -158,24 +166,29 @@ function isCommandAllowed(cmd: string, capability: Capability): boolean {
 // SeatbeltHerdrSession
 // ---------------------------------------------------------------------------
 
-interface SeatbeltSessionOpenOptions {
-  /** PID of the herdr daemon process. */
+export interface SeatbeltSessionOpenOptions {
+  /** PID of the herdr server process. */
   pid: number;
   /** Working directory for the session. */
   cwd?: string;
+  /** HERDR_SOCKET_PATH for this session (F9, F5). */
+  socketPath: string;
 }
 
 export class SeatbeltHerdrSession {
   private pid: number;
   private workspaceDir: string;
+  private socketPath: string;
   private pane0IdCache: string | undefined = undefined;
 
   private constructor(
     pid: number,
     workspaceDir: string,
+    socketPath: string,
   ) {
     this.pid = pid;
     this.workspaceDir = workspaceDir;
+    this.socketPath = socketPath;
   }
 
   // -----------------------------------------------------------------------
@@ -186,19 +199,23 @@ export class SeatbeltHerdrSession {
     const {
       cwd = process.cwd(),
       pid = -1,
+      socketPath,
     } = options;
 
     if (pid <= 0) {
       throw new Error("SeatbeltHerdrSession.open: pid is required and must be > 0");
     }
+    if (!socketPath || socketPath.length === 0) {
+      throw new Error("SeatbeltHerdrSession.open: socketPath is required");
+    }
 
     // Verify herdr is available on the host (F10)
-    const checkResult = herdrExec(["--version"]);
+    const checkResult = herdrExec(["--version"], socketPath);
     if (checkResult.exitCode !== 0) {
       throw new Error(`herdr not available on host:\n${checkResult.stderr}`);
     }
 
-    const session = new SeatbeltHerdrSession(pid, cwd);
+    const session = new SeatbeltHerdrSession(pid, cwd, socketPath);
     await session.waitForReady();
     return session;
   }
@@ -210,7 +227,7 @@ export class SeatbeltHerdrSession {
   private async waitForReady(timeoutMs = 30000): Promise<void> {
     const deadline = Date.now() + timeoutMs;
     while (Date.now() <= deadline) {
-      const result = herdrExec(["pane", "list"]);
+      const result = herdrExec(["pane", "list"], this.socketPath);
       if (result.exitCode === 0) return;
       await sleep(500);
     }
@@ -219,22 +236,34 @@ export class SeatbeltHerdrSession {
 
   static async waitForPiReady(
     pane0Id: string,
+    socketPath: string,
     _timeoutMs = 30000,
   ): Promise<void> {
     const deadline = Date.now() + (_timeoutMs || 30000);
     while (Date.now() <= deadline) {
-      const result = herdrExec(["pane", "run", pane0Id, "pi --version"]);
+      const result = herdrExec(["pane", "run", pane0Id, "pi --version"], socketPath);
       if (result.exitCode === 0 && result.stdout.trim().length > 0) return;
       await sleep(1000);
     }
     throw new Error("Timeout waiting for pi to be ready");
   }
 
+  /**
+   * Close the session. Sends `herdr server stop` on this session's
+   * socket, then polls for confirmation that the daemon has stopped (F3).
+   */
   async close(): Promise<void> {
     try {
-      herdrExec(["server", "stop"]);
+      herdrExec(["server", "stop"], this.socketPath);
     } catch {
       // best-effort
+    }
+    // Wait for the server to shut down (max 5s)
+    const deadline = Date.now() + 5000;
+    while (Date.now() <= deadline) {
+      const result = herdrExec(["pane", "list"], this.socketPath);
+      if (result.exitCode !== 0) return; // server stopped, socket gone
+      await sleep(200);
     }
   }
 
@@ -244,7 +273,7 @@ export class SeatbeltHerdrSession {
 
   async getPane0Id(): Promise<string> {
     if (this.pane0IdCache) return this.pane0IdCache;
-    const result = herdrExec(["pane", "list"]);
+    const result = herdrExec(["pane", "list"], this.socketPath);
     if (result.exitCode !== 0) {
       throw new Error(`herdr pane list failed: ${result.stderr}`);
     }
@@ -270,11 +299,11 @@ export class SeatbeltHerdrSession {
 
     const result = await (async () => {
       try {
-        return herdrExecWithInput(args, cmd.join(" "));
+        return herdrExecWithInput(args, cmd.join(" "), this.socketPath);
       } catch (err: any) {
         if (err?.message?.includes("Connection refused")) {
           return await withRetry(
-            () => Promise.resolve(herdrExecWithInput(args, cmd.join(" "))),
+            () => Promise.resolve(herdrExecWithInput(args, cmd.join(" "), this.socketPath)),
             undefined, undefined,
             `spawnPane:${cmd[0]}`,
           );
@@ -289,7 +318,6 @@ export class SeatbeltHerdrSession {
 
     const { parseAgentPaneId } = await import("../pty/herdr-session.js");
     const paneId = parseAgentPaneId(result.stdout) ?? `pane-${Date.now()}`;
-    const listResult = herdrExec(["pane", "list"]);
     const tabId = "default";
 
     return { paneId, tabId };
@@ -304,7 +332,7 @@ export class SeatbeltHerdrSession {
     tabArgs.push(opts.tabLabel);
 
     const tabResult = await withRetry(
-      () => Promise.resolve(herdrExec(tabArgs)),
+      () => Promise.resolve(herdrExec(tabArgs, this.socketPath)),
       undefined, undefined,
       `tab-create:${opts.tabLabel}`,
     );
@@ -315,6 +343,7 @@ export class SeatbeltHerdrSession {
     const agentResult = herdrExecWithInput(
       ["agent", "start", "--tab", tabId],
       cmd.join(" "),
+      this.socketPath,
     );
 
     if (agentResult.exitCode !== 0) {
@@ -330,7 +359,7 @@ export class SeatbeltHerdrSession {
   async waitForPane(paneId: string, timeoutMs = 15000): Promise<void> {
     const deadline = Date.now() + timeoutMs;
     while (Date.now() <= deadline) {
-      const result = herdrExec(["pane", "get", paneId]);
+      const result = herdrExec(["pane", "get", paneId], this.socketPath);
       if (result.exitCode !== 0) {
         throw new Error(`herdr pane get failed for ${paneId}: ${result.stderr}`);
       }
@@ -354,14 +383,14 @@ export class SeatbeltHerdrSession {
 
   async sendText(paneId: string, text: string): Promise<void> {
     auditLog(this.workspaceDir, "unknown", "read", `[send-text] ${text}`);
-    const result = herdrExecWithInput(["pane", "send-text", paneId], text);
+    const result = herdrExecWithInput(["pane", "send-text", paneId], text, this.socketPath);
     if (result.exitCode !== 0) {
       throw new Error(`herdr pane send-text failed: ${result.stderr}`);
     }
   }
 
   async sendKeys(paneId: string, keys: string[]): Promise<void> {
-    const result = herdrExec(["pane", "send-keys", paneId, ...keys]);
+    const result = herdrExec(["pane", "send-keys", paneId, ...keys], this.socketPath);
     if (result.exitCode !== 0) {
       throw new Error(`herdr pane send-keys failed: ${result.stderr}`);
     }
@@ -380,7 +409,7 @@ export class SeatbeltHerdrSession {
         `Only read-only commands are permitted for "read" agents.`,
       );
     }
-    const result = herdrExec(["pane", "run", paneId, command]);
+    const result = herdrExec(["pane", "run", paneId, command], this.socketPath);
     if (result.exitCode !== 0) {
       throw new Error(`herdr pane run failed: ${result.stderr}`);
     }
@@ -395,31 +424,11 @@ export class SeatbeltHerdrSession {
     return this.workspaceDir;
   }
 
+  getSocketPath(): string {
+    return this.socketPath;
+  }
+
   getPid(): number {
     return this.pid;
-  }
-}
-
-/**
- * Check whether herdr is available on the host (F10).
- */
-export async function herdrAvailable(): Promise<boolean> {
-  try {
-    execSync("which herdr", { stdio: "ignore" });
-    return true;
-  } catch {
-    return false;
-  }
-}
-
-/**
- * Check whether pi is available on the host (F10).
- */
-export async function piAvailable(): Promise<boolean> {
-  try {
-    execSync("which pi", { stdio: "ignore" });
-    return true;
-  } catch {
-    return false;
   }
 }

@@ -92,7 +92,8 @@ export function generateSeatbeltProfile(
     lines.push(``);
   }
 
-  // Write roots — filesystem write access to workspace + tmpdir.
+  // Write roots — filesystem write access to workspace, tmpdir, and
+  // herdr socket paths (F9: per-session sockets in /tmp/herdr-*).
   if (spec.write_roots?.paths) {
     lines.push(`;; ── write roots ──`);
     for (const raw of spec.write_roots.paths) {
@@ -102,6 +103,9 @@ export function generateSeatbeltProfile(
         lines.push(`(allow file-write* (subpath "${sbplEscape(resolved)}"))`);
       }
     }
+    // Additional: herdr socket paths under /tmp
+    lines.push(`(allow file-read* (subpath "/tmp/herdr-"))`);
+    lines.push(`(allow file-write* (subpath "/tmp/herdr-"))`);
     lines.push(``);
   }
 

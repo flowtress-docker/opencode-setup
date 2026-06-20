@@ -150,6 +150,7 @@ async function createSeatbeltContext(): Promise<SessionContext> {
       return SeatbeltHerdrSession.open({
         pid: launchResult.procHandle.pid,
         cwd: launchResult.plan.workspaceDir,
+        socketPath: launchResult.socketPath,
       });
     },
 
