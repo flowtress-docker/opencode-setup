@@ -17,6 +17,7 @@
  */
 
 import { HerdrSession, herdrAvailableInContainer, piAvailableInContainer } from "../pty/herdr-session.js";
+import type { HerdrSessionLike } from "../pty/session-interface.js";
 import {
   spawnOrchestrationTeam,
   type TeamSpawnResult,
@@ -25,7 +26,10 @@ import {
 } from "./team-spawner.js";
 
 export interface OrchestratorSessionOptions {
-  containerId: string;
+  /** For Docker: container ID. For Seatbelt: omit when `session` is provided. */
+  containerId?: string;
+  /** For Seatbelt: a pre-opened session (F1 fix). */
+  session?: HerdrSessionLike;
   cwd?: string;
   piArgs?: string[];
   /**
@@ -36,7 +40,7 @@ export interface OrchestratorSessionOptions {
 }
 
 export interface OrchestratorSession {
-  herdrSession: HerdrSession;
+  herdrSession: HerdrSession | HerdrSessionLike;
   pane0Id: string;
   piPid: number;
   /**
@@ -134,53 +138,63 @@ export async function openOrchestratorSession(
 ): Promise<OrchestratorSession> {
   const {
     containerId,
+    session: preOpenedSession,
     cwd = "/home/agent/workspace",
     piArgs = ["--version"],
     workstreams = DEFAULT_WORKSTREAMS,
   } = options;
 
-  // Verify prerequisites
-  const [herdrOk, piOk] = await Promise.all([
-    herdrAvailableInContainer(containerId),
-    piAvailableInContainer(containerId),
-  ]);
+  let herdrSession: HerdrSession | HerdrSessionLike;
 
-  if (!herdrOk) {
-    throw new Error(`herdr is not available in container ${containerId}`);
-  }
-  if (!piOk) {
-    throw new Error(`pi is not available in container ${containerId}`);
-  }
+  // Seatbelt path (F1): use the pre-opened session.
+  if (preOpenedSession) {
+    herdrSession = preOpenedSession;
+    // seatbelt/adapter.ts already checks herdr + pi availability
+  } else if (containerId) {
+    // Docker path: verify prerequisites and open session.
+    const [herdrOk, piOk] = await Promise.all([
+      herdrAvailableInContainer(containerId),
+      piAvailableInContainer(containerId),
+    ]);
 
-  // Open herdr session (this creates pane 0 automatically)
-  const herdrSession = await HerdrSession.open({
-    containerId,
-    cwd,
-  });
+    if (!herdrOk) {
+      throw new Error(`herdr is not available in container ${containerId}`);
+    }
+    if (!piOk) {
+      throw new Error(`pi is not available in container ${containerId}`);
+    }
+
+    herdrSession = await HerdrSession.open({
+      containerId,
+      cwd,
+    });
+  } else {
+    throw new Error(
+      "openOrchestratorSession: either containerId (Docker) or session (Seatbelt) is required",
+    );
+  }
 
   // Get pane 0 ID
   const pane0Id = await herdrSession.getPane0Id();
 
   // Set AGENT_CAPABILITY=read in pane 0's environment.
-  // The orchestrator (pi) is read-only and cannot mutate the repo.
-  await herdrSession.runInPane(pane0Id, `export AGENT_CAPABILITY=read && pi ${piArgs.join(" ")}`);
+  await herdrSession.runInPane(
+    pane0Id,
+    `export AGENT_CAPABILITY=read && pi ${piArgs.join(" ")}`,
+  );
 
-  // Send the initial system prompt to pi listing sub-orchestrator templates,
-  // the adversarial verification protocol, and the spawn_fixer lookup
-  // behavior.
+  // Send the initial system prompt
   await herdrSession.sendText(pane0Id, ORCHESTRATOR_SYSTEM_PROMPT + "\n");
 
-  // Get pi PID inside the container
+  // Get pi PID
   const pidResult = await herdrSession.runInPane(
     pane0Id,
     "echo $PI_PID && ps aux | grep pi | grep -v grep | awk '{print $2}' | head -1",
   );
   const piPid = parseInt(pidResult.stdout.trim(), 10) || -1;
 
-  // Phases B–D: spawn the orchestration team. One sub-orchestrator per
-  // workstream, the adversarial swarm (one per sub-orchestrator + one
-  // global), and the lazy surgical-fixers registry.
-  const team = await spawnOrchestrationTeam(herdrSession, workstreams);
+  // Phases B–D: spawn the orchestration team.
+  const team = await spawnOrchestrationTeam(herdrSession as any, workstreams);
 
   return {
     herdrSession,
@@ -195,7 +209,7 @@ export async function openOrchestratorSession(
  * Polls pi --version until it succeeds or times out.
  */
 export async function waitForPiReady(
-  herdrSession: HerdrSession,
+  herdrSession: HerdrSession | HerdrSessionLike,
   pane0Id: string,
   timeoutMs = 30000,
 ): Promise<void> {

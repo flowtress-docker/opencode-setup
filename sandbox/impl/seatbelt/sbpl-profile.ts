@@ -116,9 +116,28 @@ export function generateSeatbeltProfile(
     lines.push(``);
   }
 
-  // Network — deny all by default (loopback-only). No allow rules = loopback.
+  // $HOME access — herdr may write session state to ~/.config/herdr/
+  // or ~/.herdr/. Under seatbelt, $HOME is denied by (deny default),
+  // so we need explicit allow rules for the herdr config dir.
+  if (process.env.HOME) {
+    lines.push(`;; ── HOME herdr paths (F5) ──`);
+    lines.push(`(allow file-read* (subpath "${sbplEscape(process.env.HOME)}/.config/herdr"))`);
+    lines.push(`(allow file-write* (subpath "${sbplEscape(process.env.HOME)}/.config/herdr"))`);
+    lines.push(`(allow file-read* (subpath "${sbplEscape(process.env.HOME)}/.herdr"))`);
+    lines.push(`(allow file-write* (subpath "${sbplEscape(process.env.HOME)}/.herdr"))`);
+    lines.push(`(allow file-read* (subpath "${sbplEscape(process.env.HOME)}/.local/share/herdr"))`);
+    lines.push(`(allow file-write* (subpath "${sbplEscape(process.env.HOME)}/.local/share/herdr"))`);
+    lines.push(`(allow file-read* (subpath "${sbplEscape(process.env.HOME)}/.cache/herdr"))`);
+    lines.push(`(allow file-write* (subpath "${sbplEscape(process.env.HOME)}/.cache/herdr"))`);
+    lines.push(``);
+  }
+
+  // Network — deny all by default (loopback-only).
+  // herdr uses Unix sockets for IPC, so no network allow rules needed.
+  // If herdr ever switches to TCP loopback, uncomment:
+  //   (allow network* (local ip "127.0.0.1:*"))
   if (!spec.network?.allow) {
-    lines.push(`;; ── network: deny (loopback-only) ──`);
+    lines.push(`;; ── network: deny (loopback-only, herdr uses Unix sockets) ──`);
     lines.push(`(deny network*)`);
     lines.push(``);
   }

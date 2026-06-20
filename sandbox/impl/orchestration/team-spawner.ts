@@ -28,6 +28,8 @@
  */
 
 import { execSync } from "node:child_process";
+import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
+import { dirname } from "node:path";
 import { HerdrSession, type SpawnPaneResult, parseWorkspaceId } from "../pty/herdr-session.js";
 
 const DOCKER_BIN = (() => {
@@ -37,6 +39,17 @@ const DOCKER_BIN = (() => {
     return "docker";
   }
 })();
+
+/**
+ * Duck-type check: does this session look like a Seatbelt session?
+ * Seatbelt sessions have `getWorkspaceDir()` and `getPid()` but not
+ * `getContainerId()` returning a usable container ID.
+ */
+function isSeatbeltSession(session: any): boolean {
+  return typeof session.getWorkspaceDir === "function" &&
+    typeof session.getContainerId === "function" &&
+    (session.getContainerId() === "" || session.getContainerId() === "host");
+}
 
 /**
  * A workstream that the orchestrator delegates to. Each workstream gets a
@@ -193,13 +206,17 @@ function fixerNameFor(workstream: string): string {
  * no-op workspace filter on some versions.
  */
 async function resolveOrchestratorWorkspaceId(
-  session: HerdrSession,
+  session: HerdrSession | any,
   _orchestratorPaneId: string,
 ): Promise<string> {
+  // Under seatbelt: workspace ID is derived from session state (F2 no-op).
+  if (isSeatbeltSession(session)) {
+    return "default";
+  }
   const containerId = session.getContainerId();
   let result: string;
   try {
-    result = execSync(`docker exec ${containerId} herdr pane list`, {
+    result = execSync(`${DOCKER_BIN} exec ${containerId} herdr pane list`, {
       encoding: "utf-8",
     });
   } catch {
@@ -214,10 +231,17 @@ async function resolveOrchestratorWorkspaceId(
  * terminal noise (no `# ` prompts, no line-editing artifacts).
  */
 async function readContainerFile(
-  session: HerdrSession,
+  session: HerdrSession | any,
   _paneId: string,
   path: string,
 ): Promise<string> {
+  // Under seatbelt: read from local filesystem (F2).
+  if (isSeatbeltSession(session)) {
+    if (!existsSync(path)) {
+      throw new Error(`readContainerFile(${path}) failed: file not found`);
+    }
+    return readFileSync(path, "utf-8");
+  }
   const containerId = session.getContainerId();
   try {
     return execSync(`${DOCKER_BIN} exec ${containerId} cat ${path}`, {
@@ -242,15 +266,21 @@ async function readContainerFile(
  * default sandbox user may not have write permission there).
  */
 async function writeContainerFile(
-  session: HerdrSession,
+  session: HerdrSession | any,
   _paneId: string,
   path: string,
   contents: string,
 ): Promise<void> {
+  // Under seatbelt: write to local filesystem (F2).
+  if (isSeatbeltSession(session)) {
+    const dir = dirname(path);
+    if (!existsSync(dir)) {
+      mkdirSync(dir, { recursive: true });
+    }
+    writeFileSync(path, contents, "utf-8");
+    return;
+  }
   const containerId = session.getContainerId();
-  // The path is fixed by our constants (no shell injection risk).
-  // We do mkdir -p to ensure the parent directory exists, then
-  // pipe the contents to cat. Both go through one sh -c.
   try {
     execSync(
       `${DOCKER_BIN} exec -i ${containerId} sh -c 'mkdir -p "$(dirname "${path}")" && cat > "${path}"'`,
@@ -577,17 +607,22 @@ export function listRegisteredWorkstreams(registryContents: string): string[] {
  * pins the warning's presence.
  */
 function assertSubOrchestratorIsLowestPane(
-  session: HerdrSession,
+  session: HerdrSession | any,
   tabId: string,
   subOrchPaneId: string,
   workstream: string,
 ): void {
   let stdout: string;
   try {
-    stdout = execSync(
-      `${DOCKER_BIN} exec ${session.getContainerId()} herdr pane list`,
-      { encoding: "utf-8" },
-    );
+    // Under seatbelt: run herdr pane list directly (F2).
+    if (isSeatbeltSession(session)) {
+      stdout = execSync("herdr pane list", { encoding: "utf-8" });
+    } else {
+      stdout = execSync(
+        `${DOCKER_BIN} exec ${session.getContainerId()} herdr pane list`,
+        { encoding: "utf-8" },
+      );
+    }
   } catch {
     return; // best-effort; a transient lookup failure is non-fatal
   }

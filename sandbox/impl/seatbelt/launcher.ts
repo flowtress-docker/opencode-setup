@@ -15,8 +15,9 @@
  *   - Cleanup = kill(`SeatbeltLaunchResult.proc`)
  */
 
-import { resolve } from "node:path";
+import { resolve, dirname } from "node:path";
 import { readFileSync } from "node:fs";
+import { fileURLToPath } from "node:url";
 import { tmpdir } from "node:os";
 import { parse as parseToml } from "smol-toml";
 import {
@@ -33,19 +34,20 @@ import {
 } from "./sbpl-profile.js";
 import type { SeatbeltSpec } from "../../src/launch-sandbox.js";
 
-const SPEC_PATH = "/Users/lab/projects/opencode-setup/spec-2/sandbox/src/launch-sandbox.toml";
+const __dirname = dirname(fileURLToPath(import.meta.url));
+const SPEC_PATH = resolve(__dirname, "../../src/launch-sandbox.toml");
 
-export interface LaunchPlan {
+export interface SeatbeltLaunchPlan {
   sandboxes: number;
   mode: string;
   workspaceDir: string;
 }
 
-export interface LaunchResult {
+export interface SeatbeltRunResult {
   /** The herdr daemon process handle. */
   procHandle: SeatbeltLaunchResult;
   /** The launch plan (sandboxes=1, mode, workspaceDir). */
-  plan: LaunchPlan;
+  plan: SeatbeltLaunchPlan;
 }
 
 /**
@@ -98,7 +100,7 @@ function readSeatbeltSpec(): {
  * @returns LaunchResult with the herdr daemon handle and plan
  * @throws Error if any prerequisite is missing
  */
-export async function launchFromSpec(): Promise<LaunchResult> {
+export async function seatbeltLaunchFromSpec(): Promise<SeatbeltRunResult> {
   // Prerequisites
   if (!seatbeltAvailable()) {
     throw new Error(
@@ -124,7 +126,7 @@ export async function launchFromSpec(): Promise<LaunchResult> {
   // Spawn herdr under sandbox-exec.
   const procHandle = seatbeltLaunch(profilePath, workspaceDir);
 
-  const plan: LaunchPlan = {
+  const plan: SeatbeltLaunchPlan = {
     sandboxes: 1,
     mode: "single-sandbox",
     workspaceDir,
@@ -141,22 +143,44 @@ export async function launchFromSpec(): Promise<LaunchResult> {
  * SBPL profile tempfile.
  */
 export async function cleanupSeatbelt(
-  result: LaunchResult,
+  result: SeatbeltRunResult,
 ): Promise<void> {
   seatbeltStop(result.procHandle.proc);
   removeSeatbeltProfile(result.procHandle.profilePath);
 }
 
 /**
- * Verify the seatbelt sandbox is running.
- * Returns true if the herdr daemon PID is still alive.
+ * Wait for the seatbelt sandbox to be ready. Polls herdr pane list
+ * until the daemon responds, or times out.
+ *
+ * Docker equivalent: waitForHerdrReady() polling `herdr pane list`
+ * inside the container.
  */
-export function verifySeatbelt(result: LaunchResult): boolean {
+export async function waitForSeatbeltReady(
+  timeoutMs = 30000,
+): Promise<void> {
+  const { execSync } = await import("node:child_process");
+  const deadline = Date.now() + timeoutMs;
+  while (Date.now() <= deadline) {
+    try {
+      execSync("herdr pane list", { stdio: "ignore" });
+      return;
+    } catch {
+      await new Promise((r) => setTimeout(r, 500));
+    }
+  }
+  throw new Error("Timeout waiting for seatbelt herdr daemon to be ready");
+}
+
+/**
+ * Verify the seatbelt sandbox is running and healthy.
+ * Previously used kill(pid, 0) — now polls herdr pane list
+ * which actually checks daemon responsiveness (F3 fix).
+ */
+export async function verifySeatbelt(result: SeatbeltRunResult): Promise<boolean> {
   try {
-    const pid = result.procHandle.pid;
-    if (pid <= 0) return false;
-    // Sending signal 0 checks existence without killing
-    process.kill(pid, 0);
+    const { execSync: es } = await import("node:child_process");
+    es("herdr pane list", { stdio: "ignore", timeout: 3000 });
     return true;
   } catch {
     return false;
