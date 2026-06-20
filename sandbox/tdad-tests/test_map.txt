@@ -1,7 +1,6 @@
 # tdad-ts test_map.txt
 # format: <source> -> <test> [<strategy>:<score>:<tier>]
 
-fixtures/sandbox-spec/src/docker.ts -> fixtures/sandbox-spec/tests/docker.spec.ts [Direct:0.96:high]
 fixtures/sandbox-spec/src/governance.ts -> impl/__tests__/live/adversarial-protocol.spec.ts [Transitive:0.66:medium]
 fixtures/sandbox-spec/src/governance.ts -> impl/__tests__/live/adversarial-capability.spec.ts [Imports:0.48:low]
 fixtures/sandbox-spec/src/governance.ts -> impl/__tests__/live/adversarial-governance.spec.ts [Imports:0.48:low]
@@ -15,6 +14,7 @@ fixtures/sandbox-spec/src/orchestration.ts -> impl/__tests__/live/orchestration.
 fixtures/sandbox-spec/src/orchestration.ts -> fixtures/sandbox-spec/tests/user-workspace.spec.ts [Imports:0.48:low]
 fixtures/sandbox-spec/src/orchestration.ts -> impl/__tests__/live/adversarial-protocol.spec.ts [Imports:0.48:low]
 fixtures/sandbox-spec/src/picode.ts -> fixtures/sandbox-spec/tests/picode.spec.ts [Direct:0.96:high]
+fixtures/sandbox-spec/src/seatbelt.ts -> fixtures/sandbox-spec/tests/seatbelt.spec.ts [Direct:0.96:high]
 fixtures/sandbox-spec/src/system.ts -> fixtures/sandbox-spec/tests/system.spec.ts [Direct:0.96:high]
 fixtures/sandbox-spec/src/user-workspace.ts -> fixtures/sandbox-spec/tests/user-workspace.spec.ts [Direct:0.96:high]
 impl/docker/container-launcher.ts -> impl/__tests__/live/adversarial-herdr.spec.ts [Imports:0.48:low]
